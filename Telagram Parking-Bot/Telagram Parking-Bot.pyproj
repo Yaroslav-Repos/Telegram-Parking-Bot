@@ -4,7 +4,7 @@
     <SchemaVersion>2.0</SchemaVersion>
     <ProjectGuid>90ef9aed-6b34-4cf0-817b-534ebbc42ce7</ProjectGuid>
     <ProjectHome>.</ProjectHome>
-    <StartupFile>Parking_simulation.py</StartupFile>
+    <StartupFile>Telagram Parking-Bot.py</StartupFile>
     <SearchPath>
     </SearchPath>
     <WorkingDirectory>.</WorkingDirectory>

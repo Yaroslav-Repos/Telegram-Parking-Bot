@@ -3,182 +3,180 @@ import logging
 import os
 from dotenv import load_dotenv
 
-from aiogram.types import BotCommand, BotCommandScopeDefault 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import BotCommand, BotCommandScopeDefault, ReplyKeyboardMarkup, KeyboardButton
 from pymongo import MongoClient
 
-# Завантаження змінних середовища
-load_dotenv()
 
-# Отримання змінних
+load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB = os.getenv("MONGO_DB")
 
-# Перевірка наявності змінних
 if not TOKEN:
     raise ValueError("NO BOT_TOKEN!")
 if not MONGO_URI:
     raise ValueError("NO MONGO_URI!")
 
-# Підключення до MongoDB
+
 client = MongoClient(MONGO_URI)
 db = client[MONGO_DB]
 users_collection = db["users"]
 parking_collection = db["parking"]
 
-# Налаштування aiogram
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
 
-# Функція для встановлення меню команд бота
-async def set_commands():
-    commands = [
-        BotCommand(command="/start", description="Старт бота")
-    ]
-    await bot.set_my_commands(commands, BotCommandScopeDefault())
+class User:
+    def __init__(self, user_id: int):
+        self.user_id = user_id
+        self.data = users_collection.find_one({"user_id": self.user_id})
 
-#Функції пошуку користувача в MongoDB
-def get_user(user_id):
-    return users_collection.find_one({"user_id": user_id})
+    def exists(self):
+        return self.data is not None
 
-#Функції реєстрації користувача, шляхом запису в колекцію MongoDB
-def register_user(user_id):
-    if not get_user(user_id):
-        users_collection.insert_one({"user_id": user_id, "balance": 0, "parked": None})
+    def register(self):
+        if not self.exists():
+            users_collection.insert_one({"user_id": self.user_id, "balance": 0, "parked": None})
+            self.data = users_collection.find_one({"user_id": self.user_id})
 
-#Функції оновлення балансу користувача
-def update_balance(user_id, amount):
-    users_collection.update_one({"user_id": user_id}, {"$inc": {"balance": amount}})
+    def get_balance(self):
+        self.data = users_collection.find_one({"user_id": self.user_id})
+        return self.data.get("balance", 0)
 
-#Встановлення у MongoDB майданчика та місця парковки користувача
-def park_user(user_id, lot_number, slot_number):
-    users_collection.update_one({"user_id": user_id}, {"$set": {"parked": {"lot": lot_number, "slot": slot_number}}})
-    parking_collection.update_one(
-        {"lot": lot_number, "slot": slot_number},
-        {"$set": {"user_id": user_id}},
-        upsert=True
-    )
+    def update_balance(self, amount: int):
+        users_collection.update_one({"user_id": self.user_id}, {"$inc": {"balance": amount}})
+        self.data = users_collection.find_one({"user_id": self.user_id})
 
-#Оновлення даних про виїзд користувача, звільнення парко-місця у базі даних
-def exit_parking(user_id):
-    user = get_user(user_id)
-    if user and user.get("parked"):
-        lot, slot = user["parked"]["lot"], user["parked"]["slot"]
-        users_collection.update_one({"user_id": user_id}, {"$set": {"parked": None}})
-        parking_collection.update_one({"lot": lot, "slot": slot}, {"$set": {"user_id": None}})
+    def is_parked(self):
+        self.data = users_collection.find_one({"user_id": self.user_id})
+        return self.data.get("parked") is not None
 
-#Кнопки головного меню
-main_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🔑 Реєстрація"), KeyboardButton(text="🚗 Паркуватися")],
-        [KeyboardButton(text="💳 Поповнити баланс"), KeyboardButton(text="🚪 Виїзд")]
-    ],
-    resize_keyboard=True
-)
+    def park(self, lot: int, slot: int):
+        users_collection.update_one({"user_id": self.user_id}, {"$set": {"parked": {"lot": lot, "slot": slot}}})
+        parking_collection.update_one({"lot": lot, "slot": slot}, {"$set": {"user_id": self.user_id}}, upsert=True)
 
-#Команда "Старт", привітання користувача
-@dp.message(Command("start"))
-async def start_command(message: types.Message):
-    await message.answer("Вітаємо у системі паркування!", reply_markup=main_menu)
+    def exit_parking(self):
+        if self.is_parked():
+            lot, slot = self.data["parked"]["lot"], self.data["parked"]["slot"]
+            users_collection.update_one({"user_id": self.user_id}, {"$set": {"parked": None}})
+            parking_collection.update_one({"lot": lot, "slot": slot}, {"$set": {"user_id": None}})
+            return lot, slot
+        return None, None
 
-@dp.message(lambda message: message.text == "🔑 Реєстрація")
-async def register_user_command(message: types.Message):
-    user_id = message.from_user.id
-    if get_user(user_id):
-        await message.answer("Ви вже зареєстровані!", reply_markup=main_menu)
-    else:
-        register_user(user_id)
-        await message.answer("Реєстрація успішна! Поповніть баланс для паркування.", reply_markup=main_menu)
 
-@dp.message(lambda message: message.text == "💳 Поповнити баланс")
-async def add_balance(message: types.Message):
-    user_id = message.from_user.id
-    user = get_user(user_id)
-    if not user:
-        await message.answer("Ви не зареєстровані! Спочатку зареєструйтесь.", reply_markup=main_menu)
-        return
-    update_balance(user_id, 50)
-    user = get_user(user_id)
-    await message.answer(f"Баланс поповнено! Ваш баланс: {user['balance']} грн.", reply_markup=main_menu)
+class ParkingLot:
+    def __init__(self, lot_number: int, max_slots: int):
+        self.lot_number = lot_number
+        self.max_slots = max_slots
 
-@dp.message(lambda message: message.text == "🚗 Паркуватися")
-async def park_car(message: types.Message):
-    user_id = message.from_user.id
-    user = get_user(user_id)
-    
-    if not user:
-        await message.answer("Ви не зареєстровані! Спочатку зареєструйтесь.", reply_markup=main_menu)
-        return
-    if user["balance"] < 50:
-        await message.answer("Недостатньо коштів для паркування. Поповніть баланс!", reply_markup=main_menu)
-        return
-    if user["parked"] is not None:
-        await message.answer("Ви вже припарковані!", reply_markup=main_menu)
-        return
+    def get_occupied_slots(self):
+        return {slot["slot"] for slot in parking_collection.find({"lot": self.lot_number, "user_id": {"$ne": None}})}
 
-    park_menu = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="1-й майданчик")],
-            [KeyboardButton(text="2-й майданчик")],
-            [KeyboardButton(text="3-й майданчик")]
-        ],
-        resize_keyboard=True)
-    await message.answer("Оберіть паркувальний майданчик:", reply_markup=park_menu)
+    def get_available_slot(self):
+        occupied = self.get_occupied_slots()
+        return next((i for i in range(1, self.max_slots + 1) if i not in occupied), None)
 
-@dp.message(lambda message: message.text in ["1-й майданчик", "2-й майданчик", "3-й майданчик"])
-async def choose_parking_lot(message: types.Message):
-    user_id = message.from_user.id
-    user = get_user(user_id)
-    
-    if user["parked"] is not None:
-        await message.answer("Ви вже припарковані!", reply_markup=main_menu)
-        return
 
-    lot_number = int(message.text[0])  # Отримуємо номер майданчика
-    occupied_slots = parking_collection.find({"lot": lot_number, "user_id": {"$ne": None}})
-    occupied_slots = {slot["slot"] for slot in occupied_slots}
+class ParkingBot:
+    def __init__(self, token: str):
+        self.bot = Bot(token=token)
+        self.dp = Dispatcher()
+        self.main_menu = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="🔑 Реєстрація"), KeyboardButton(text="🚗 Паркуватися")],
+                [KeyboardButton(text="💳 Поповнити баланс"), KeyboardButton(text="🚪 Виїзд")]
+            ],
+            resize_keyboard=True
+        )
+        self.lots_config = {1: 31, 2: 21, 3: 27}
+        self.register_handlers()
 
-    n = 0
-    if lot_number == 1:
-        n = 31
-    if lot_number == 2:
-        n = 21
-    if lot_number == 3:
-        n = 27
+    async def set_commands(self):
+        commands = [BotCommand(command="/start", description="Старт бота")]
+        await self.bot.set_my_commands(commands, BotCommandScopeDefault())
 
-    available_slot = next((i for i in range(1, n) if i not in occupied_slots), None)
-    
-    if available_slot:
-        park_user(user_id, lot_number, available_slot)
-        update_balance(user_id, -50)
-        await message.answer(f"Ви припаркувалися на місці {available_slot} майданчика {lot_number}.", reply_markup=main_menu)
-    else:
-        await message.answer("На цьому майданчику немає вільних місць.", reply_markup=main_menu)
+    def register_handlers(self):
+        self.dp.message.register(self.start_command, Command(commands=["start"]))
+        self.dp.message.register(self.register_user_command, lambda m: m.text == "🔑 Реєстрація")
+        self.dp.message.register(self.add_balance_command, lambda m: m.text == "💳 Поповнити баланс")
+        self.dp.message.register(self.park_car_command, lambda m: m.text == "🚗 Паркуватися")
+        self.dp.message.register(self.choose_parking_lot_command, lambda m: m.text in ["1-й майданчик", "2-й майданчик", "3-й майданчик"])
+        self.dp.message.register(self.exit_parking_command, lambda m: m.text == "🚪 Виїзд")
 
-@dp.message(lambda message: message.text == "🚪 Виїзд")
-async def exit_parking_command(message: types.Message):
-    user_id = message.from_user.id
-    user = get_user(user_id)
-    
-    if not user:
-        await message.answer("Ви не зареєстровані!", reply_markup=main_menu)
-        return
-    if user["parked"] is None:
-        await message.answer("Ви не припарковані.", reply_markup=main_menu)
-        return
+    # Handlers
+    async def start_command(self, message: types.Message):
+        await message.answer("Вітаємо у системі паркування!", reply_markup=self.main_menu)
 
-    lot_number, slot_number = user["parked"]["lot"], user["parked"]["slot"]
-    exit_parking(user_id)
-    await message.answer(f"Ви покинули місце {slot_number} майданчика {lot_number}.", reply_markup=main_menu)
+    async def register_user_command(self, message: types.Message):
+        user = User(message.from_user.id)
+        if user.exists():
+            await message.answer("Ви вже зареєстровані!", reply_markup=self.main_menu)
+        else:
+            user.register()
+            await message.answer("Реєстрація успішна! Поповніть баланс для паркування.", reply_markup=self.main_menu)
 
-async def main():
-    await set_commands() 
-    await dp.start_polling(bot, skip_updates=True)  # Запуск бота для обробки повідомлень
+    async def add_balance_command(self, message: types.Message):
+        user = User(message.from_user.id)
+        if not user.exists():
+            await message.answer("Ви не зареєстровані! Спочатку зареєструйтесь.", reply_markup=self.main_menu)
+            return
+        user.update_balance(50)
+        await message.answer(f"Баланс поповнено! Ваш баланс: {user.get_balance()} грн.", reply_markup=self.main_menu)
 
+    async def park_car_command(self, message: types.Message):
+        user = User(message.from_user.id)
+        if not user.exists():
+            await message.answer("Ви не зареєстровані! Спочатку зареєструйтесь.", reply_markup=self.main_menu)
+            return
+        if user.get_balance() < 50:
+            await message.answer("Недостатньо коштів для паркування. Поповніть баланс!", reply_markup=self.main_menu)
+            return
+        if user.is_parked():
+            await message.answer("Ви вже припарковані!", reply_markup=self.main_menu)
+            return
+
+        park_menu = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text=f"{i}-й майданчик")] for i in self.lots_config.keys()],
+            resize_keyboard=True
+        )
+        await message.answer("Оберіть паркувальний майданчик:", reply_markup=park_menu)
+
+    async def choose_parking_lot_command(self, message: types.Message):
+        user = User(message.from_user.id)
+        if user.is_parked():
+            await message.answer("Ви вже припарковані!", reply_markup=self.main_menu)
+            return
+
+        lot_number = int(message.text[0])
+        lot = ParkingLot(lot_number, self.lots_config[lot_number])
+        available_slot = lot.get_available_slot()
+
+        if available_slot:
+            user.park(lot_number, available_slot)
+            user.update_balance(-50)
+            await message.answer(f"Ви припаркувалися на місці {available_slot} майданчика {lot_number}.", reply_markup=self.main_menu)
+        else:
+            await message.answer("На цьому майданчику немає вільних місць.", reply_markup=self.main_menu)
+
+    async def exit_parking_command(self, message: types.Message):
+        user = User(message.from_user.id)
+        if not user.exists():
+            await message.answer("Ви не зареєстровані!", reply_markup=self.main_menu)
+            return
+        if not user.is_parked():
+            await message.answer("Ви не припарковані.", reply_markup=self.main_menu)
+            return
+
+        lot, slot = user.exit_parking()
+        await message.answer(f"Ви покинули місце {slot} майданчика {lot}.", reply_markup=self.main_menu)
+
+    async def run(self):
+        await self.set_commands()
+        await self.dp.start_polling(self.bot, skip_updates=True)
+
+
+# Entry point
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
-
+    bot_app = ParkingBot(TOKEN)
+    asyncio.run(bot_app.run())
