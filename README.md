@@ -12,7 +12,7 @@ Writes parking data to MongoDB</br>
 Shared Database Pattern:</br>
 
 Telegram Bot  ─┐</br>
-                ├── MongoDB</br>
+&nbsp;&nbsp;&nbsp;├── MongoDB</br>
 Next.js App  ──┘</br>
 
 
